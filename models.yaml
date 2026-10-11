@@ -1,0 +1,31 @@
+# Modell-Registry. Neue Modelle = neuer Eintrag, kein Code nötig (solange ein Adapter-Typ passt).
+# type: stats   -> statsforecast-Klasse (class, params)
+# type: chronos -> lokales Chronos-Verzeichnis (path), family: bolt | t5 | chronos2
+# type: tirex2  -> lokales TiRex-2-Verzeichnis (path: model-config.yaml + model.ckpt)
+baseline: seasonal_naive            # Vergleichsmodell für die Validierung ("muss die Baseline schlagen")
+default_candidates:                 # was bei models: ["auto"] getestet wird
+  - seasonal_naive
+  - auto_ets
+  - theta
+  - chronos_bolt_small
+  - tirex_2
+
+models:
+  seasonal_naive: {type: stats, class: SeasonalNaive}
+  naive:          {type: stats, class: Naive}
+  historic_average: {type: stats, class: HistoricAverage}
+  auto_ets:       {type: stats, class: AutoETS}
+  auto_arima:     {type: stats, class: AutoARIMA}
+  theta:          {type: stats, class: AutoTheta}
+  croston:        {type: stats, class: CrostonClassic}      # Intermittierende Nachfrage, ohne Intervalle
+  adida:          {type: stats, class: ADIDA}
+
+  # Gewichte vorher lokal ablegen (siehe README), HF_HUB_OFFLINE=1 im Container.
+  chronos_bolt_tiny:  {type: chronos, family: bolt,     path: /models/chronos-bolt-tiny}
+  chronos_bolt_small: {type: chronos, family: bolt,     path: /models/chronos-bolt-small}
+  chronos_bolt_base:  {type: chronos, family: bolt,     path: /models/chronos-bolt-base}
+  chronos_2:          {type: chronos, family: chronos2, path: /models/chronos-2}
+
+  # TiRex-2 (NXAI, Apache-2.0). device: cpu ist der sichere Standard. Für cuda braucht das Image
+  # ein CUDA Toolkit mit nvcc (passend zu PyTorch) und eine GPU mit Compute Capability >= 8.0.
+  tirex_2:            {type: tirex2, path: /models/tirex-2, device: cpu}

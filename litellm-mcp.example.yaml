@@ -1,0 +1,9 @@
+# Ergänzung für die LiteLLM-config.yaml (Syntax laut LiteLLM-Doku zu mcp_servers; gegen deine Version prüfen).
+mcp_servers:
+  forecast:
+    url: "http://forecast-mcp:8201/mcp"
+    transport: "http"
+    description: "Zeitreihenprognose, Backtest und Anomalieerkennung (lokal)"
+    auth_type: "api_key"            # sendet X-API-Key – unser Server akzeptiert X-API-Key und Bearer
+    auth_value: "os.environ/FORECAST_API_KEY"
+    # allow_all_keys: true          # NICHT setzen; Zugriff lieber pro Key/Team vergeben

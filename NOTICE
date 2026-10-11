@@ -1,0 +1,7 @@
+OPAIRS Forecast Service
+Copyright 2026 OPAIRS Systems FlexCo
+https://opairs-systems.com/
+
+Dieses Produkt enthält keinen Code aus der timecopilot-Bibliothek oder aus anderen Prognose-Frameworks;
+Backtest und Modellauswahl sind eigene Implementierungen. Die verwendeten Bibliotheken und Modelle
+stehen unter ihren jeweiligen Lizenzen (siehe THIRD_PARTY.md). Modellgewichte werden nicht mitgeliefert.

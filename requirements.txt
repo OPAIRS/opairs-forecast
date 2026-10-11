@@ -1,0 +1,9 @@
+# Kern (CPU, Statistikmodelle)
+statsforecast>=2.0,<3
+pandas>=2.0,<3
+numpy
+pyyaml
+fastapi
+uvicorn[standard]
+httpx
+mcp>=1.2,<2        # MCP-Schicht (v2 hat FastMCP umbenannt)

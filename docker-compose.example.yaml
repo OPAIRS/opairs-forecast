@@ -1,0 +1,38 @@
+# Beispiel – in dein bestehendes Compose übernehmen. Ports werden NICHT veröffentlicht;
+# erreichbar nur im Docker-Netz (z. B. durch LiteLLM). Netzwerk wie litellm/openwebui wählen.
+x-forecast: &forecast
+  build:
+    context: ./forecast-service
+    args:
+      WITH_FOUNDATION: "1"          # "0" = nur Statistikmodelle, deutlich kleineres Image
+  restart: unless-stopped
+  environment: &forecast-env
+    FORECAST_API_KEY: ${FORECAST_API_KEY}
+    HF_HUB_OFFLINE: "1"
+    FORECAST_DEVICE: auto            # auto | cpu | cuda | cuda:1
+    FORECAST_MAX_CONCURRENCY: "1"    # gleichzeitige Prognoseläufe (Schutz vor Überlast)
+    FORECAST_N_JOBS: "4"           # Prozesse für Statistikmodelle
+    FORECAST_TORCH_THREADS: "8"    # Threads für Chronos/TiRex auf der CPU
+    FORECAST_WARMUP: "1"            # Modelle beim Start laden
+    # Optional /v1/explain über LiteLLM (nur wenn ein Modell mit gutem Deutsch verfügbar ist):
+    # LLM_BASE_URL: http://litellm:4000/v1
+    # LLM_API_KEY: ${LITELLM_KEY_FOR_FORECAST}
+    # LLM_MODEL: <modellname-in-litellm>
+  volumes:
+    - /srv/models/timeseries:/models:ro   # Modellgewichte, siehe README
+    # - ./forecast-service/models.yaml:/srv/models.yaml:ro   # eigene Modellliste statt der eingebauten
+
+services:
+  forecast-api:
+    <<: *forecast
+    container_name: forecast-api
+  forecast-mcp:
+    <<: *forecast
+    container_name: forecast-mcp
+    command: ["python", "-m", "app.mcp_server"]
+    healthcheck: {disable: true}
+  # GPU (optional, nur wenn Chronos auf GPU laufen soll) – bei beiden Diensten oder nur forecast-api:
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices: [{driver: nvidia, device_ids: ["2"], capabilities: [gpu]}]
