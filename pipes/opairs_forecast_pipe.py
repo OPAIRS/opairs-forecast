@@ -1,7 +1,7 @@
 """
 title: OPAIRS Forecast
 author: OPAIRS Systems
-version: 0.3.0
+version: 0.4.0
 description: Test-/Beispiel-Pipe für OpenWebUI: Zeitreihenprognose, Backtest und Anomalieerkennung über den LiteLLM-MCP-Gateway (selbst gehosteter Forecast-Service). Daten kommen als SQL-Block (Postgres, nur lesend) oder als CSV direkt im Chat. Die Pipe enthält nur Logik, die Modelle laufen im Service.
 requirements: requests, psycopg2-binary
 """

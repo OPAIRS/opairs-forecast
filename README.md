@@ -7,7 +7,8 @@ A standalone, self-hosted forecasting service for time series. It runs entirely 
 - **Stateless:** series come in with the request, nothing is stored, no database, no LLM required.
 - **Model selection by backtest:** all candidates run through the same rolling-origin backtest. A model is chosen only
   if it beats a simple baseline (seasonal naive). Otherwise the service returns the baseline with `validated: false`
-  and a warning. It does not claim quality it has not measured.
+  and a warning. It does not claim quality it has not measured. `validated: true` means only "better than the baseline
+  in the historical backtest", not a guarantee for the future.
 - **Swappable models:** `models.yaml` is the registry. Statistical models via statsforecast, foundation models
   (Chronos-T5/-Bolt/-2 and TiRex-2) from local directories. Another adapter is one small class in `app/adapters/`.
 - **Two interfaces, one core:** REST (FastAPI/OpenAPI at `/docs`) and optional MCP (`app/mcp_server.py`).
@@ -107,6 +108,31 @@ usually generalize better. Disable it with `"ensemble": false`. The name in the 
 
 If no model beats the baseline, the baseline is returned (`validated: false`, with a warning).
 
+## Intermittent demand (spare parts, slow movers)
+
+Series with many zero periods are detected per series (average demand interval ADI ≥ 1.32, Syntetos–Boylan). For them,
+`models: ["auto"]` adds the candidates `croston_sba`, `tsb`, `imapa` and `adida` (`intermittent_candidates` in
+`models.yaml`), and the backtest compares them with RMSE instead of MAE, because MAE rewards a constant zero forecast.
+The result carries a warning that names the affected series. These models return point forecasts only (`lo`/`hi` stay empty); if the ensemble contains one of them, intervals are missing there too.
+
+## Covariates (optional)
+
+Additional numeric columns (promotion, temperature, price …) can be passed with the series:
+
+```json
+{"series": [{"unique_id": "A", "ds": "2025-01-01", "y": 10, "promo": 0, "temp": 3.1}, "..."],
+ "covariates": ["promo", "temp"],
+ "future_covariates": [{"unique_id": "A", "ds": "2026-01-01", "promo": 1, "temp": 2.5}, "... exactly h rows per series"],
+ "h": 12, "models": ["auto"]}
+```
+
+Covariates that appear in `future_covariates` count as known in the future (e.g. planned promotions, calendar); the others
+count as known only in the past. Models that can use them (`chronos_2`, `tirex_2`, `auto_arima` with future-known
+covariates) run twice in the backtest, with (`<model>@cov`) and without covariates, so you see whether they help. The
+service picks the covariate variant only if it wins the backtest. Missing values or a wrong number of future rows are
+rejected with a clear error. `live/live_covariates.py` checks the data flow against a running service; the unit tests use
+the real ARIMA path and fakes for the foundation models, so verify Chronos-2 and TiRex-2 with your own weights.
+
 ## Benchmark (reproducible)
 
 `live/benchmark.py` downloads 12 public time series (monthly, quarterly, weekly, daily, hourly; some with several
@@ -147,6 +173,53 @@ How to read this, and limits:
 LITELLM_KEY=... python3 live/benchmark.py --url http://localhost:4000   # needs LiteLLM with the MCP server
 ```
 
+### Larger benchmark (M4, own data, intermittent)
+
+`live/benchmark_large.py` evaluates on more series than the small benchmark and reports robust metrics instead of one mean:
+relative MAE and RMSE against `seasonal_naive` as geometric mean (main figure), median, win rate, MASE, sMAPE, interval
+coverage, and how often `validated: true` was actually confirmed in the hold-out. Series whose baseline is error-free in
+the hold-out are excluded from the relative figures (and counted).
+
+```bash
+python3 live/benchmark_large.py --source m4 --freqs Yearly,Quarterly,Monthly,Weekly,Daily,Hourly --n 100    # local, statistical models
+python3 live/benchmark_large.py --source m4 --n 100 --url http://localhost:8200 --key $FORECAST_API_KEY      # against a running service (with foundation models)
+python3 live/benchmark_large.py --source csv --csv my_data.csv --h 6 --freq MS --season 12                    # your own data, last h points held out
+python3 live/benchmark_large.py --source intermittent --n 60                                                  # synthetic sparse demand
+```
+
+M4 series are drawn at random per frequency (official M4 horizons and seasonalities, `--seed` makes it reproducible).
+
+
+**First run on the server** (October 2026, CPU, `chronos_bolt_small` and `tirex_2`, 20 random M4 series each from Quarterly,
+Weekly and Hourly, seed 1, 3 backtest windows, via LiteLLM; 60 series, about 21 minutes including all single models):
+
+| Model | Quarterly | Weekly | Hourly | All 60 (rel. MAE geo) | Win rate | Coverage 80 % |
+|---|---|---|---|---|---|---|
+| TiRex-2 | 0.734 | 0.227 | 0.653 | **0.477** | 77 % | 90 |
+| **Auto** | 0.774 | 0.232 | 0.609 | **0.478** | 77 % | 92 |
+| Chronos-Bolt small | 0.924 | 0.249 | 0.643 | 0.529 | 77 % | 90 |
+| AutoARIMA | 0.740 | 0.273 | 0.802 | 0.545 | 73 % | 88 |
+| AutoETS | 0.801 | 0.276 | 1.272 | 0.656 | 75 % | 78 |
+| Theta | 0.860 | 0.326 | 2.122 | 0.841 | 60 % | 82 |
+
+How to read this, and limits:
+
+- On average over these 60 series, `auto` is as good as the best single model (TiRex-2: 0.477 vs 0.478), better on the
+  hourly series and the median, but not better everywhere: on Quarterly it chose `ensemble(tirex_2+theta)` and landed
+  behind TiRex-2 and AutoARIMA. The gain of the automatic selection is protection against bad single models (on Hourly
+  Theta scores 2.12 and AutoETS 1.27), not a better ranking than the best model.
+- `validated: true` was reported for all 60 series, but in the hold-out only 77 % of them actually beat the baseline.
+  Model selection is global for the series passed together (here 20), so `validated` is a statement about the group, not
+  a guarantee per series.
+- The 80 % intervals of `auto` covered 92 % of the actual values, so they are conservative (too wide). AutoETS was too
+  narrow on Hourly (61 %).
+- Croston, TSB, IMAPA and ADIDA are meant for intermittent demand and score badly on these smooth series, as expected.
+  `auto` only adds them for series that are detected as intermittent, and none of the 60 M4 series were. On series without
+  zeros, IMAPA and ADIDA are identical.
+- 20 series per frequency and one hold-out each is a small sample, and Yearly, Monthly and Daily were not run. These
+  numbers show a tendency, not a ranking.
+Monash and GIFT-Eval loaders are not implemented; their data can be passed in via `--source csv`.
+
 ## Docker and LiteLLM
 
 `docker-compose.example.yaml` starts `forecast-api` (8200) and `forecast-mcp` (8201) from the same image.
@@ -161,18 +234,28 @@ test: use a dedicated LiteLLM virtual key instead of the master key, and a read-
 interface texts are in German.
 
 **Important for larger runs:** by default, LiteLLM aborts calls to MCP servers after 60 seconds
-(`LITELLM_MCP_CLIENT_TIMEOUT`, default 60.0). A run with 50 series takes about 30 seconds on an 80-core CPU, 200 series
-about 2 minutes. For such runs, set `LITELLM_MCP_CLIENT_TIMEOUT=900` in LiteLLM's environment. Without it, the answer
+(`LITELLM_MCP_CLIENT_TIMEOUT`, default 60.0). Measured on an 80-core CPU with `FORECAST_N_JOBS=16`, via LiteLLM, with
+synthetic monthly series (120 months, all models via `auto` including backtest): 50 series about 17 seconds, 200 series
+about 35 seconds. Without process parallelism (`FORECAST_N_JOBS=1`) the same runs took about 30 seconds and about 2 to
+2.5 minutes. Runtimes depend strongly on hardware, series length, models and windows (`live/loadtest.py` reproduces the test). For such runs, set `LITELLM_MCP_CLIENT_TIMEOUT=900` in LiteLLM's environment. Without it, the answer
 never arrives and the call hangs without an error message. The direct REST route (`/v1/forecast`) is not affected.
 
 ## Limits (honestly)
 
 - The backtest is the only quality check. Few windows on short series are noisy; increase `n_windows`.
 - Model selection is global for all series passed in. Call series with very different behavior separately.
-- No covariates, no hierarchical reconciliation, no training of your own models.
+- Covariates only for the models that support them (see above); no hierarchical reconciliation, no training of your own models.
+- Intermittent demand is detected and handled, but on very sparse series every model is uncertain; check `validated` and the interval.
 - Every foundation model has its own license. Check it before passing weights on. The service does not ship them.
 - A run occupies one concurrency slot (`FORECAST_MAX_CONCURRENCY`). Many series × models × windows take time; set
   timeouts in gateways accordingly.
+
+## Credits
+
+The credit for the models goes to their creators: **TiRex-2** to NXAI, **Chronos** to Amazon Science, and the statistical
+models (ETS, Theta, ARIMA, Croston variants …) to the **statsforecast** project by Nixtla. This service develops none of
+these models. It only makes them easy to deploy, compare and use for everyone: locally, with weights that are downloaded
+once. Please check each model's license before passing weights on.
 
 ## License
 

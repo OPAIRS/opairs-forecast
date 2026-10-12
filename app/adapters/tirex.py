@@ -14,7 +14,7 @@ import threading
 import numpy as np
 import pandas as pd
 
-from .base import apply_torch_threads, Adapter, OUT_COLS, future_index
+from .base import apply_torch_threads, Adapter, CovSpec, OUT_COLS, future_index
 
 
 def pick_quantile(values: np.ndarray, native: list[float], level: float) -> np.ndarray:
@@ -32,6 +32,7 @@ def pick_quantile(values: np.ndarray, native: list[float], level: float) -> np.n
 
 class TiRex2Adapter(Adapter):
     kind = "tirex2"
+    supports_covariates = True  # TiRex-2: Past- und Future-Kovariaten (Paket tirex-2, TimeseriesType)
 
     def __init__(self, name: str, path: str, device: str = "auto", batch_size: int = 256):
         super().__init__(name)
@@ -76,18 +77,34 @@ class TiRex2Adapter(Adapter):
             ]
         return []
 
-    def predict(self, df, h, freq, level, season_length):
+    def predict(self, df, h, freq, level, season_length, cov=None, future_df=None):
         import torch
         from tirex2 import TimeseriesType
 
         apply_torch_threads(torch)
         model = self._load()
         alpha = (1 - level / 100) / 2
+        fut_by_uid = {}
+        if cov is not None and cov.future:
+            fut_by_uid = {str(u): g.sort_values("ds") for u, g in future_df.groupby("unique_id", sort=False)}
         ids, series = [], []
         for uid, g in df.groupby("unique_id", sort=False):
             ids.append(uid)
             y = torch.tensor(g["y"].to_numpy(dtype=np.float32))[None, :]  # (1, T): univariat
-            series.append(TimeseriesType(target=y, past_covariates=None, future_covariates=None))
+            past_cov = fut_cov = None
+            if cov is not None:
+                # past_covariates [V_p, T]: nur in der Vergangenheit bekannt. future_covariates [V_f, T+h]:
+                # zukunftsbekannte Kovariaten über Historie UND Horizont (Historienwerte aus df, Horizontwerte aus future_df).
+                if cov.past_only:
+                    past_cov = torch.tensor(np.stack([g[c].to_numpy(dtype=np.float32) for c in cov.past_only]))
+                if cov.future:
+                    fg = fut_by_uid[str(uid)]
+                    fut_cov = torch.tensor(
+                        np.stack(
+                            [np.concatenate([g[c].to_numpy(dtype=np.float32), fg[c].to_numpy(dtype=np.float32)]) for c in cov.future]
+                        )
+                    )
+            series.append(TimeseriesType(target=y, past_covariates=past_cov, future_covariates=fut_cov))
         forecasts = model.forecast(series, prediction_length=h, output_type="numpy", batch_size=self.batch_size)
         frames = []
         for uid, fc in zip(ids, forecasts):

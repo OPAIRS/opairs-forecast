@@ -10,12 +10,14 @@ import numpy as np
 import pandas as pd
 
 from .. import config
-from .base import Adapter, OUT_COLS
+from .base import Adapter, CovSpec, OUT_COLS
 
 log = logging.getLogger("forecast")
 _WARM: set[str] = set()
 _WARM_LOCK = threading.Lock()
 MIN_SERIES_FOR_PARALLEL = 4
+# statsforecast-Modelle mit exogenen Regressoren (brauchen Zukunftswerte, X_df)
+EXOG_CLASSES = {"AutoARIMA"}
 
 
 class StatsAdapter(Adapter):
@@ -25,6 +27,19 @@ class StatsAdapter(Adapter):
         super().__init__(name)
         self.cls = cls
         self.params = params or {}
+
+    @property
+    def supports_covariates(self) -> bool:  # type: ignore[override]
+        return self.cls in EXOG_CLASSES
+
+    def can_use(self, cov: CovSpec) -> bool:
+        # Regressoren brauchen bekannte Zukunftswerte; reine Vergangenheitskovariaten kann AutoARIMA nicht nutzen
+        return self.supports_covariates and bool(cov.future)
+
+    def cov_notes(self, cov: CovSpec) -> list[str]:
+        if cov.past_only:
+            return [f"{self.name}: nutzt nur Kovariaten mit bekannten Zukunftswerten ({', '.join(cov.future)}); ignoriert: {', '.join(cov.past_only)}."]
+        return []
 
     def _model_class(self):
         import statsforecast.models as sm
@@ -77,7 +92,7 @@ class StatsAdapter(Adapter):
                 log.warning("Aufwärmen von %s vor der Parallelisierung fehlgeschlagen", self.name, exc_info=True)
             _WARM.add(key)
 
-    def predict(self, df, h, freq, level, season_length):
+    def predict(self, df, h, freq, level, season_length, cov=None, future_df=None):
         from statsforecast import StatsForecast
 
         cls = self._model_class()
@@ -85,15 +100,18 @@ class StatsAdapter(Adapter):
         if "season_length" in inspect.signature(cls.__init__).parameters and "season_length" not in kwargs:
             kwargs["season_length"] = season_length
         model = cls(**kwargs)
-        data = df[["unique_id", "ds", "y"]]
+        exog = list(cov.future) if (cov is not None and self.can_use(cov)) else []
+        data = df[["unique_id", "ds", "y", *exog]]
+        x_df = future_df[["unique_id", "ds", *exog]] if exog else None
+        extra = {"X_df": x_df} if exog else {}
 
         def run(nj):
             sf = StatsForecast(models=[model], freq=freq, n_jobs=nj)
             try:
-                return sf.forecast(df=data, h=h, level=[level])
+                return sf.forecast(df=data, h=h, level=[level], **extra)
             except Exception:
                 # Modelle ohne Intervallunterstützung (z. B. Croston)
-                return sf.forecast(df=data, h=h)
+                return sf.forecast(df=data, h=h, **extra)
 
         nj = self._jobs(int(data["unique_id"].nunique()))
         if nj > 1:

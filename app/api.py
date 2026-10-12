@@ -6,7 +6,7 @@ import logging
 from typing import Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__, core, explain as explain_mod
 from .config import API_KEY, MAX_HORIZON
@@ -33,6 +33,7 @@ def auth(x_api_key: str | None = Header(None), authorization: str | None = Heade
 
 
 class Point(BaseModel):
+    model_config = ConfigDict(extra="allow")  # zusätzliche Zahlenspalten = Kovariaten (siehe `covariates`)
     unique_id: Union[str, int]
     ds: str
     y: float | None
@@ -45,14 +46,27 @@ class Common(BaseModel):
     level: int = Field(80, ge=50, le=99, description="Intervallniveau in %")
 
 
-class ForecastRequest(Common):
+class CovMixin(BaseModel):
+    covariates: list[str] | None = Field(
+        None,
+        description="Namen zusätzlicher Spalten in `series`, die als Kovariaten genutzt werden (Zahlen, ohne Lücken). "
+        "Ohne future_covariates gelten sie als nur in der Vergangenheit bekannt.",
+    )
+    future_covariates: list[dict] | None = Field(
+        None,
+        description="Zukunftswerte bekannter Kovariaten: je Serie genau h Zeilen {unique_id, ds, <Kovariate>...} direkt nach "
+        "dem letzten ds. Die hier enthaltenen Spalten gelten als zukunftsbekannt (z. B. Feiertage, Schichtplan, geplante Aufträge).",
+    )
+
+
+class ForecastRequest(CovMixin, Common):
     h: int = Field(..., ge=1, le=MAX_HORIZON)
     models: list[str] = Field(["auto"], description="'auto' oder Modellnamen aus /v1/models")
     n_windows: int = Field(2, ge=0, le=20, description="Backtest-Fenster; 0 = kein Backtest (genau ein Modell)")
     ensemble: bool = Field(True, description="Ensemble der zwei besten Modelle als Kandidat zulassen")
 
 
-class BacktestRequest(Common):
+class BacktestRequest(CovMixin, Common):
     h: int = Field(..., ge=1, le=MAX_HORIZON)
     models: list[str] = ["auto"]
     n_windows: int = Field(3, ge=1, le=20)
@@ -102,7 +116,7 @@ def forecast(req: ForecastRequest):
     return _guard(
         lambda: core.run_forecast(
             _recs(req), req.h, req.freq, req.season_length, req.models, req.n_windows, req.level,
-            ensemble=req.ensemble,
+            ensemble=req.ensemble, covariates=req.covariates, future_covariates=req.future_covariates,
         )
     )
 
@@ -112,7 +126,7 @@ def backtest(req: BacktestRequest):
     return _guard(
         lambda: core.run_backtest(
             _recs(req), req.h, req.freq, req.season_length, req.models, req.n_windows, req.level, req.include_rows,
-            ensemble=req.ensemble,
+            ensemble=req.ensemble, covariates=req.covariates, future_covariates=req.future_covariates,
         )
     )
 
@@ -134,7 +148,8 @@ def explain(req: ExplainRequest):
     def run():
         recs = _recs(req)
         res = core.run_forecast(
-            recs, req.h, req.freq, req.season_length, req.models, req.n_windows, req.level, ensemble=req.ensemble
+            recs, req.h, req.freq, req.season_length, req.models, req.n_windows, req.level, ensemble=req.ensemble,
+            covariates=req.covariates, future_covariates=req.future_covariates,
         )
         res["explanation"] = explain_mod.explain(explain_mod.summarize(recs, res), req.question)
         return res

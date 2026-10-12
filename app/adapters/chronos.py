@@ -12,7 +12,7 @@ import threading
 import numpy as np
 import pandas as pd
 
-from .base import apply_torch_threads, Adapter, OUT_COLS, future_index
+from .base import apply_torch_threads, Adapter, CovSpec, OUT_COLS, future_index
 
 # Quantilbereich, den das jeweilige Modell trainiert hat; außerhalb wird begrenzt.
 _BOLT_RANGE = (0.1, 0.9)
@@ -20,6 +20,13 @@ _BOLT_RANGE = (0.1, 0.9)
 
 class ChronosAdapter(Adapter):
     kind = "chronos"
+
+    @property
+    def supports_covariates(self) -> bool:  # type: ignore[override]
+        return self.family == "chronos2"  # nur Chronos-2 kennt Kovariaten (Past und Future)
+
+    def cov_notes(self, cov: CovSpec) -> list[str]:
+        return []
 
     def __init__(self, name: str, path: str, device: str = "auto", batch_size: int = 64, family: str = "bolt"):
         super().__init__(name)
@@ -60,17 +67,31 @@ class ChronosAdapter(Adapter):
             ]
         return []
 
-    def predict(self, df, h, freq, level, season_length):
+    def predict(self, df, h, freq, level, season_length, cov=None, future_df=None):
         import torch
 
         apply_torch_threads(torch)
         pipe = self._load()
         alpha = (1 - level / 100) / 2
         qs = [round(alpha, 4), 0.5, round(1 - alpha, 4)]
+        use_cov = cov is not None and self.supports_covariates
+        fut_by_uid = {}
+        if use_cov and cov.future:
+            fut_by_uid = {str(u): g.sort_values("ds") for u, g in future_df.groupby("unique_id", sort=False)}
         ids, contexts = [], []
         for uid, g in df.groupby("unique_id", sort=False):
             ids.append(uid)
-            contexts.append(torch.tensor(g["y"].to_numpy(dtype=np.float32)))
+            y = g["y"].to_numpy(dtype=np.float32)
+            if use_cov:
+                # Chronos-2: past_covariates = alle Kovariaten über die Historie (auch die zukunftsbekannten),
+                # future_covariates = deren Werte für den Horizont (Schlüssel sind eine Teilmenge der past-Schlüssel)
+                item = {"target": y, "past_covariates": {c: g[c].to_numpy(dtype=np.float32) for c in cov.past}}
+                if cov.future:
+                    fg = fut_by_uid[str(uid)]
+                    item["future_covariates"] = {c: fg[c].to_numpy(dtype=np.float32) for c in cov.future}
+                contexts.append(item)
+            else:
+                contexts.append(torch.tensor(y))
         frames = []
         for start in range(0, len(contexts), self.batch_size):
             chunk = contexts[start : start + self.batch_size]

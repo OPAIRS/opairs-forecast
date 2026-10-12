@@ -44,11 +44,17 @@ async def forecast(
     level: int = 80,
     season_length: int | None = None,
     ensemble: bool = True,
+    covariates: list[str] | None = None,
+    future_covariates: list[dict] | None = None,
 ) -> dict:
     """Prognose mit automatischer Modellwahl per Backtest. series = [{unique_id, ds, y}, ...].
-    validated=false heißt: kein Modell schlug die Baseline (Seasonal-Naive)."""
+    validated=false heißt: kein Modell schlug die Baseline (Seasonal-Naive); true heißt nur "im Backtest besser",
+    keine Garantie für die Zukunft.
+    Kovariaten: covariates = Namen zusätzlicher Zahlenspalten in series; future_covariates = Zukunftswerte der bekannten
+    Kovariaten (je Serie h Zeilen {unique_id, ds, <Kovariate>}). Fähige Modelle laufen mit (`name@cov`) und ohne."""
     return await asyncio.to_thread(
-        core.run_forecast, series, h, freq, season_length, models or ["auto"], n_windows, level, ensemble
+        core.run_forecast, series, h, freq, season_length, models or ["auto"], n_windows, level, ensemble,
+        covariates, future_covariates,
     )
 
 
@@ -61,10 +67,14 @@ async def backtest(
     n_windows: int = 3,
     season_length: int | None = None,
     ensemble: bool = True,
+    covariates: list[str] | None = None,
+    future_covariates: list[dict] | None = None,
 ) -> dict:
-    """Modellvergleich per Rolling-Origin-Backtest (relative MAE gegen Baseline)."""
+    """Modellvergleich per Rolling-Origin-Backtest (relative MAE gegen Baseline; bei intermittierenden Serien RMSE).
+    Kovariaten wie bei forecast."""
     return await asyncio.to_thread(
-        core.run_backtest, series, h, freq, season_length, models or ["auto"], n_windows, 80, False, ensemble
+        core.run_backtest, series, h, freq, season_length, models or ["auto"], n_windows, 80, False, ensemble,
+        covariates, future_covariates,
     )
 
 

@@ -37,6 +37,7 @@ def load_config() -> dict:
     cfg.setdefault("baseline", "seasonal_naive")
     cfg.setdefault("models", {})
     cfg.setdefault("default_candidates", [cfg["baseline"]])
+    cfg.setdefault("intermittent_candidates", [])
     if cfg["baseline"] not in cfg["models"]:
         raise ValueError(f"baseline '{cfg['baseline']}' fehlt in models")
     return cfg

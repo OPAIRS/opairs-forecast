@@ -7,7 +7,7 @@ Eigenständiger, selbst gehosteter Prognose-Service für Zeitreihen. Läuft voll
 - **Zustandslos:** Serien kommen im Request, nichts wird gespeichert, keine Datenbank, kein LLM nötig.
 - **Modellwahl per Backtest:** Alle Kandidaten laufen im selben Rolling-Origin-Backtest. Ein Modell wird nur
   gewählt, wenn es die einfache Baseline (Seasonal-Naive) schlägt. Sonst liefert der Service die Baseline mit
-  `validated: false` und einer Warnung. Er behauptet keine Qualität, die er nicht gemessen hat.
+  `validated: false` und einer Warnung. Er behauptet keine Qualität, die er nicht gemessen hat. `validated: true` heißt nur „im historischen Backtest besser als die Baseline“, keine Garantie für die Zukunft.
 - **Austauschbare Modelle:** `models.yaml` ist die Registry. Statistikmodelle über statsforecast, Foundation-Modelle
   (Chronos-T5/-Bolt/-2 und TiRex-2) aus lokalen Verzeichnissen. Weitere Adapter sind eine kleine Klasse in `app/adapters/`.
 - **Zwei Schnittstellen, ein Kern:** REST (FastAPI/OpenAPI unter `/docs`) und optional MCP (`app/mcp_server.py`).
@@ -104,6 +104,32 @@ Abschalten mit `"ensemble": false`. Der Name im Ergebnis zeigt die Mitglieder, z
 
 Schlägt kein Modell die Baseline, wird die Baseline geliefert (`validated: false`, mit Warnung).
 
+## Intermittierende Nachfrage (Ersatzteile, Langsamdreher)
+
+Reihen mit vielen Nullperioden werden je Reihe erkannt (mittleres Nachfrageintervall ADI ≥ 1,32, Syntetos–Boylan). Für sie
+nimmt `models: ["auto"]` zusätzlich `croston_sba`, `tsb`, `imapa` und `adida` auf (`intermittent_candidates` in
+`models.yaml`), und der Backtest vergleicht sie mit RMSE statt MAE, weil MAE eine konstante Null-Prognose belohnt.
+Das Ergebnis enthält eine Warnung mit den betroffenen Reihen. Diese Modelle liefern nur Punktprognosen (`lo`/`hi` bleiben leer); enthält das Ensemble eines davon, fehlen die Intervalle auch dort.
+
+## Kovariaten (optional)
+
+Zusätzliche Zahlenspalten (Aktion, Temperatur, Preis …) können mit den Reihen übergeben werden:
+
+```json
+{"series": [{"unique_id": "A", "ds": "2025-01-01", "y": 10, "promo": 0, "temp": 3.1}, "..."],
+ "covariates": ["promo", "temp"],
+ "future_covariates": [{"unique_id": "A", "ds": "2026-01-01", "promo": 1, "temp": 2.5}, "... genau h Zeilen je Reihe"],
+ "h": 12, "models": ["auto"]}
+```
+
+Kovariaten in `future_covariates` gelten als zukünftig bekannt (z. B. geplante Aktionen, Kalender), die übrigen nur als
+Vergangenheitswerte. Modelle, die sie nutzen können (`chronos_2`, `tirex_2`, `auto_arima` mit zukünftig bekannten
+Kovariaten), laufen im Backtest zweimal, mit (`<modell>@cov`) und ohne Kovariaten, damit man sieht, ob sie helfen. Die
+Variante mit Kovariaten wird nur gewählt, wenn sie den Backtest gewinnt. Fehlende Werte oder eine falsche Zahl Zukunftszeilen
+werden mit klarer Fehlermeldung abgelehnt. `live/live_covariates.py` prüft den Datenfluss gegen einen laufenden Dienst; die
+Unit-Tests nutzen für ARIMA den echten Pfad und für die Foundation-Modelle Attrappen, Chronos-2 und TiRex-2 deshalb mit den
+eigenen Gewichten prüfen.
+
 ## Benchmark (reproduzierbar)
 
 `live/benchmark.py` lädt 12 öffentliche Zeitreihen (monatlich, quartalsweise, wöchentlich, täglich, stündlich; teils mehrere
@@ -142,6 +168,53 @@ Lesehilfe und Grenzen:
 LITELLM_KEY=... python3 live/benchmark.py --url http://localhost:4000   # braucht LiteLLM mit dem MCP-Server
 ```
 
+### Größerer Benchmark (M4, eigene Daten, intermittierend)
+
+`live/benchmark_large.py` wertet mehr Reihen aus als der kleine Benchmark und berichtet robuste Kennzahlen statt eines
+Mittelwerts: relative MAE und RMSE gegen `seasonal_naive` als geometrisches Mittel (Hauptkennzahl), Median, Gewinnrate, MASE,
+sMAPE, Intervallabdeckung und wie oft `validated: true` im Holdout tatsächlich bestätigt wurde. Reihen, deren Baseline im
+Holdout fehlerfrei ist, zählen nicht in die relativen Kennzahlen (werden aber ausgewiesen).
+
+```bash
+python3 live/benchmark_large.py --source m4 --freqs Yearly,Quarterly,Monthly,Weekly,Daily,Hourly --n 100    # lokal, Statistikmodelle
+python3 live/benchmark_large.py --source m4 --n 100 --url http://localhost:8200 --key $FORECAST_API_KEY      # gegen laufenden Dienst (mit Foundation-Modellen)
+python3 live/benchmark_large.py --source csv --csv meine_daten.csv --h 6 --freq MS --season 12                # eigene Daten, letzte h Punkte zurückgehalten
+python3 live/benchmark_large.py --source intermittent --n 60                                                  # synthetischer Sporadikbedarf
+```
+
+Die M4-Reihen werden je Frequenz zufällig gezogen (offizielle M4-Horizonte und Saisonlängen, `--seed` macht es
+reproduzierbar). 
+
+**Erster Lauf auf dem Server** (Oktober 2026, CPU, `chronos_bolt_small` und `tirex_2`, je 20 zufällige M4-Reihen aus
+Quarterly, Weekly und Hourly, Seed 1, 3 Backtest-Fenster, über LiteLLM; 60 Reihen, rund 21 Minuten inklusive aller Einzelmodelle):
+
+| Modell | Quarterly | Weekly | Hourly | Alle 60 (rel. MAE geo) | Gewinnrate | Abdeckung 80 % |
+|---|---|---|---|---|---|---|
+| TiRex-2 | 0,734 | 0,227 | 0,653 | **0,477** | 77 % | 90 |
+| **Auto** | 0,774 | 0,232 | 0,609 | **0,478** | 77 % | 92 |
+| Chronos-Bolt small | 0,924 | 0,249 | 0,643 | 0,529 | 77 % | 90 |
+| AutoARIMA | 0,740 | 0,273 | 0,802 | 0,545 | 73 % | 88 |
+| AutoETS | 0,801 | 0,276 | 1,272 | 0,656 | 75 % | 78 |
+| Theta | 0,860 | 0,326 | 2,122 | 0,841 | 60 % | 82 |
+
+Lesehilfe und Grenzen:
+
+- Über diese 60 Reihen ist `auto` so gut wie das beste Einzelmodell (TiRex-2: 0,477 gegen 0,478), besser bei den
+  Stundenreihen und beim Median, aber nicht überall: Bei Quarterly wählte es `ensemble(tirex_2+theta)` und lag hinter
+  TiRex-2 und AutoARIMA. Der Nutzen der automatischen Wahl ist der Schutz vor schlechten Einzelmodellen (bei Hourly
+  kommt Theta auf 2,12 und AutoETS auf 1,27), nicht ein besserer Rang als das beste Modell.
+- `validated: true` wurde für alle 60 Reihen gemeldet, im Holdout schlugen aber nur 77 % davon die Baseline. Die
+  Modellwahl gilt global für die gemeinsam übergebenen Reihen (hier 20), `validated` ist also eine Aussage über die
+  Gruppe, keine Garantie je Reihe.
+- Die 80-%-Intervalle von `auto` deckten 92 % der Istwerte ab, sie sind also konservativ (zu breit). AutoETS war bei
+  Hourly zu schmal (61 %).
+- Croston, TSB, IMAPA und ADIDA sind für intermittierende Nachfrage gedacht und schneiden auf diesen glatten Reihen
+  erwartungsgemäß schlecht ab. `auto` nimmt sie nur für als intermittierend erkannte Reihen auf, und keine der 60
+  M4-Reihen war es. Bei Reihen ohne Nullen sind IMAPA und ADIDA identisch.
+- 20 Reihen je Frequenz mit je einem Holdout sind eine kleine Stichprobe, Yearly, Monthly und Daily wurden nicht
+  gelaufen. Die Zahlen zeigen eine Tendenz, keine Rangfolge.
+ Loader für Monash und GIFT-Eval gibt es nicht; deren Daten lassen sich über `--source csv` einspeisen.
+
 ## Docker und LiteLLM
 
 `docker-compose.example.yaml` startet `forecast-api` (8200) und `forecast-mcp` (8201) aus demselben Image.
@@ -155,18 +228,28 @@ optional `DB_DSN` für SQL-Blöcke) trägst du nach dem Import in den Valves der
 LiteLLM-Virtual-Key statt Master-Key und ein nur lesender Datenbankbenutzer.
 
 **Wichtig bei größeren Läufen:** LiteLLM bricht Aufrufe an MCP-Server standardmäßig nach 60 Sekunden ab
-(`LITELLM_MCP_CLIENT_TIMEOUT`, Standard 60,0). Ein Lauf mit 50 Serien liegt auf einer 80-Kern-CPU bei rund 30 Sekunden, 200 Serien
-brauchen etwa 2 Minuten. Für solche Läufe in der Umgebung von LiteLLM `LITELLM_MCP_CLIENT_TIMEOUT=900` setzen. Ohne den Wert
+(`LITELLM_MCP_CLIENT_TIMEOUT`, Standard 60,0). Gemessen auf einer 80-Kern-CPU mit `FORECAST_N_JOBS=16`, über LiteLLM, mit
+synthetischen Monatsreihen (120 Monate, alle Modelle per `auto` inklusive Backtest): 50 Serien rund 17 Sekunden, 200 Serien
+rund 35 Sekunden. Ohne Prozess-Parallelität (`FORECAST_N_JOBS=1`) dauerten dieselben Läufe rund 30 Sekunden bzw. 2 bis
+2,5 Minuten. Die Laufzeit hängt stark von Hardware, Serienlänge, Modellen und Fenstern ab (`live/loadtest.py` wiederholt den Test). Für solche Läufe in der Umgebung von LiteLLM `LITELLM_MCP_CLIENT_TIMEOUT=900` setzen. Ohne den Wert
 kommt die Antwort nie an und der Aufruf hängt ohne Fehlermeldung. Der direkte REST-Weg (`/v1/forecast`) ist davon nicht betroffen.
 
 ## Grenzen (ehrlich)
 
 - Der Backtest ist die einzige Qualitätsprüfung. Wenige Fenster auf kurzen Serien sind verrauscht; `n_windows` erhöhen.
 - Die Modellwahl ist global für alle übergebenen Serien. Serien mit sehr unterschiedlichem Verhalten getrennt aufrufen.
-- Keine Kovariaten, keine hierarchische Abstimmung, kein Training eigener Modelle.
+- Kovariaten nur für Modelle, die sie unterstützen (siehe oben); keine hierarchische Abstimmung, kein Training eigener Modelle.
+- Intermittierende Nachfrage wird erkannt und behandelt, bei sehr dünnen Reihen bleibt aber jede Prognose unsicher; `validated` und das Intervall beachten.
 - Jedes Foundation-Modell hat eine eigene Lizenz. Prüfen, bevor Gewichte weitergegeben werden. Der Service liefert sie nicht mit.
 - Ein Lauf belegt einen Parallelitäts-Slot (`FORECAST_MAX_CONCURRENCY`). Viele Serien × Modelle × Fenster brauchen Zeit;
   Timeouts in Gateways entsprechend setzen.
+
+## Danksagung
+
+Der Dank für die Modelle gebührt ihren Urhebern: **TiRex-2** NXAI, **Chronos** Amazon Science und die Statistikmodelle
+(ETS, Theta, ARIMA, Croston-Varianten …) dem Projekt **statsforecast** von Nixtla. Dieser Dienst entwickelt keines dieser
+Modelle. Er macht sie nur für alle einfach einsetz-, vergleich- und nutzbar: lokal, mit Gewichten, die einmal geladen werden.
+Bitte vor einer Weitergabe von Gewichten die Lizenz des jeweiligen Modells prüfen.
 
 ## Lizenz
 

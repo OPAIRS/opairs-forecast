@@ -10,6 +10,12 @@ default_candidates:                 # was bei models: ["auto"] getestet wird
   - chronos_bolt_small
   - tirex_2
 
+intermittent_candidates:            # kommen bei auto dazu, sobald die Eingabe intermittierende Serien enthält (ADI >= 1,32)
+  - croston_sba
+  - tsb
+  - imapa
+  - adida
+
 models:
   seasonal_naive: {type: stats, class: SeasonalNaive}
   naive:          {type: stats, class: Naive}
@@ -17,7 +23,11 @@ models:
   auto_ets:       {type: stats, class: AutoETS}
   auto_arima:     {type: stats, class: AutoARIMA}
   theta:          {type: stats, class: AutoTheta}
-  croston:        {type: stats, class: CrostonClassic}      # Intermittierende Nachfrage, ohne Intervalle
+  # Sporadische Nachfrage (Ersatzteile, C-Teile). Alle ohne Prognoseintervalle (lo/hi leer).
+  croston:        {type: stats, class: CrostonClassic}
+  croston_sba:    {type: stats, class: CrostonSBA}          # Syntetos-Boylan-Korrektur, meist besser als klassisches Croston
+  tsb:            {type: stats, class: TSB, params: {alpha_d: 0.2, alpha_p: 0.2}}   # Teunter-Syntetos-Babai, erkennt auslaufende Nachfrage
+  imapa:          {type: stats, class: IMAPA}               # aggregiert über mehrere Zeitebenen
   adida:          {type: stats, class: ADIDA}
 
   # Gewichte vorher lokal ablegen (siehe README), HF_HUB_OFFLINE=1 im Container.

@@ -13,8 +13,9 @@ import numpy as np
 import pandas as pd
 
 from .config import ENSEMBLE_TOLERANCE, MAX_HORIZON, MAX_CONCURRENCY
-from .data import DataError, default_season_length, infer_freq, to_frame
-from .registry import baseline_name, get_adapter, resolve_models
+from .adapters.base import CovSpec
+from .data import DataError, default_season_length, infer_freq, intermittency, to_frame, to_future_frame
+from .registry import baseline_name, get_adapter, resolve_models, split_name
 
 log = logging.getLogger("forecast")
 _SLOTS = threading.BoundedSemaphore(MAX_CONCURRENCY)
@@ -39,17 +40,38 @@ class Prepared:
     freq: str
     season_length: int
     warnings: list[str] = field(default_factory=list)
+    intermittent: frozenset = frozenset()  # Serien mit sporadischer Nachfrage (ADI >= 1,32)
+    cov: CovSpec | None = None  # Kovariaten (Spalten in df); cov.future = auch für den Horizont bekannt
+    future_df: pd.DataFrame | None = None  # Zukunftswerte der bekannten Kovariaten, h Zeilen je Serie
 
 
-def prepare(records: list[dict], freq: str | None, season_length: int | None, h: int) -> Prepared:
+def prepare(
+    records: list[dict],
+    freq: str | None,
+    season_length: int | None,
+    h: int,
+    covariates: list[str] | None = None,
+    future_records: list[dict] | None = None,
+) -> Prepared:
     if not 1 <= h <= MAX_HORIZON:
         raise DataError(f"h muss zwischen 1 und {MAX_HORIZON} liegen")
-    df = to_frame(records)
+    df = to_frame(records, covariates)
     f = infer_freq(df, freq)
     sl = season_length or default_season_length(f)
     if sl < 1:
         raise DataError("season_length muss >= 1 sein")
-    return Prepared(df, f, sl)
+    inter = frozenset(u for u, v in intermittency(df).items() if v["intermittent"])
+    cov, fut = None, None
+    if covariates:
+        covs = tuple(dict.fromkeys(covariates))
+        future_cols: tuple[str, ...] = ()
+        if future_records:
+            fut = to_future_frame(future_records, list(covs), df, f, h)
+            future_cols = tuple(c for c in fut.columns if c not in ("unique_id", "ds"))
+        cov = CovSpec(covs, future_cols)
+    elif future_records:
+        raise DataError("future_covariates ohne covariates: die Kovariatenspalten in covariates benennen")
+    return Prepared(df, f, sl, intermittent=inter, cov=cov, future_df=fut)
 
 
 # --------------------------------------------------------------------------- backtest
@@ -78,7 +100,8 @@ def _windows(df: pd.DataFrame, h: int, n_windows: int, min_train: int):
 
 def backtest_model(name: str, prep: Prepared, h: int, n_windows: int, level: int) -> tuple[pd.DataFrame, list[str]]:
     """Backtest eines Modells. Gibt (Zeilen mit y/yhat/lo/hi, übersprungene Serien) zurück."""
-    adapter = get_adapter(name)
+    base_name, use_cov = split_name(name)
+    adapter = get_adapter(base_name)
     min_train = max(2 * prep.season_length, 8)
     wins, skipped = _windows(prep.df, h, n_windows, min_train)
     if not wins:
@@ -88,8 +111,12 @@ def backtest_model(name: str, prep: Prepared, h: int, n_windows: int, level: int
         )
     frames = []
     for j, (train, test) in wins.items():
-        pred = adapter.predict(train, h, prep.freq, level, prep.season_length)
-        m = test.merge(pred, on=["unique_id", "ds"], how="left")
+        if use_cov:
+            fut = test[["unique_id", "ds", *prep.cov.future]] if prep.cov.future else None
+            pred = adapter.predict(train, h, prep.freq, level, prep.season_length, cov=prep.cov, future_df=fut)
+        else:
+            pred = adapter.predict(train[["unique_id", "ds", "y"]], h, prep.freq, level, prep.season_length)
+        m = test[["unique_id", "ds", "y"]].merge(pred, on=["unique_id", "ds"], how="left")
         if m["yhat"].isna().any():
             raise RuntimeError(f"{name}: Prognose unvollständig (Fenster {j})")
         m["window"] = j
@@ -101,17 +128,32 @@ def _mae_by_series(bt: pd.DataFrame) -> pd.Series:
     return (bt["y"] - bt["yhat"]).abs().groupby(bt["unique_id"]).mean()
 
 
-def score_models(results: dict[str, pd.DataFrame], baseline: str) -> dict[str, dict]:
+def _rmse_by_series(bt: pd.DataFrame) -> pd.Series:
+    return np.sqrt(((bt["y"] - bt["yhat"]) ** 2).groupby(bt["unique_id"]).mean())
+
+
+def _error_by_series(bt: pd.DataFrame, intermittent: frozenset = frozenset()) -> pd.Series:
+    """Fehler je Serie: MAE, bei intermittierenden Serien RMSE. Bei sporadischer Nachfrage ist die MAE-optimale
+    Prognose die Null (der Median); der MAE würde Nullprognosen gegenüber Croston & Co. belohnen."""
+    mae = _mae_by_series(bt)
+    if not intermittent:
+        return mae
+    rmse = _rmse_by_series(bt)
+    return pd.Series({u: (rmse[u] if u in intermittent else mae[u]) for u in mae.index})
+
+
+def score_models(results: dict[str, pd.DataFrame], baseline: str, intermittent: frozenset = frozenset()) -> dict[str, dict]:
     """Relative MAE gegen die Baseline (pro Serie, dann gemittelt). <1 heißt besser als Baseline.
 
-    Trifft die Baseline eine Serie praktisch perfekt (MAE ~ 0), kann kein Modell sie schlagen:
+    Für intermittierende Serien wird statt des MAE der RMSE verglichen (Feld bleibt aus Kompatibilität `relative_mae`).
+    Trifft die Baseline eine Serie praktisch perfekt (Fehler ~ 0), kann kein Modell sie schlagen:
     gleich perfekt -> Verhältnis 1, sonst sehr großes Verhältnis."""
     base_bt = results[baseline]
-    base_mae = _mae_by_series(base_bt)
+    base_mae = _error_by_series(base_bt, intermittent)
     floor = 1e-9 * base_bt["y"].abs().groupby(base_bt["unique_id"]).mean() + 1e-12
     scores = {}
     for name, bt in results.items():
-        mae = _mae_by_series(bt)
+        mae = _error_by_series(bt, intermittent)
         common = base_mae.index.intersection(mae.index)
         ratios = []
         for u in common:
@@ -124,12 +166,14 @@ def score_models(results: dict[str, pd.DataFrame], baseline: str) -> dict[str, d
         if bt["lo"].notna().all():
             cov = float(((bt["y"] >= bt["lo"]) & (bt["y"] <= bt["hi"])).mean())
         scores[name] = {
-            "mae": float(mae.mean()),
+            "mae": float(_mae_by_series(bt).mean()),
             "relative_mae": rel,
             "beats_baseline": bool(rel is not None and rel < 1.0 and name != baseline),
             "interval_coverage": cov,
             "n_series": int(len(mae)),
         }
+        if intermittent:
+            scores[name]["n_intermittent"] = int(len(intermittent & set(mae.index)))
     return scores
 
 
@@ -173,7 +217,7 @@ def _blend(frames: list[pd.DataFrame], keys: list[str]) -> pd.DataFrame:
     return out
 
 
-def _add_ensemble(results: dict[str, pd.DataFrame], scores: dict[str, dict], base: str):
+def _add_ensemble(results: dict[str, pd.DataFrame], scores: dict[str, dict], base: str, intermittent: frozenset = frozenset()):
     """Fügt das Ensemble der zwei besten Modelle (beide schlagen die Baseline) als weiteren Kandidaten hinzu.
     Gibt (results, scores, name|None) zurück."""
     good = sorted(
@@ -184,7 +228,7 @@ def _add_ensemble(results: dict[str, pd.DataFrame], scores: dict[str, dict], bas
         return results, scores, None
     name = ensemble_name(good)
     results = {**results, name: _blend([results[m] for m in good], ["unique_id", "ds", "window"])}
-    scores = score_models(results, base)
+    scores = score_models(results, base, intermittent)
     scores[name]["members"] = good
     return results, scores, name
 
@@ -197,14 +241,57 @@ def select_final(scores: dict[str, dict], base: str, ens: str | None) -> tuple[s
     return best, validated, warn
 
 
+def _predict_one(name: str, prep: Prepared, h: int, level: int) -> tuple[pd.DataFrame, list[str]]:
+    base_name, use_cov = split_name(name)
+    ad = get_adapter(base_name)
+    if use_cov:
+        fc = ad.predict(prep.df, h, prep.freq, level, prep.season_length, cov=prep.cov, future_df=prep.future_df)
+        return fc, ad.notes(level) + ad.cov_notes(prep.cov)
+    return ad.predict(prep.df[["unique_id", "ds", "y"]], h, prep.freq, level, prep.season_length), ad.notes(level)
+
+
 def _predict_final(selected: str, prep: Prepared, h: int, level: int) -> tuple[pd.DataFrame, list[str]]:
     members = ensemble_members(selected)
     if members:
-        frames = [get_adapter(m).predict(prep.df, h, prep.freq, level, prep.season_length) for m in members]
-        notes = [n for m in members for n in get_adapter(m).notes(level)]
+        parts = [_predict_one(m, prep, h, level) for m in members]
+        notes = [n for _, ns in parts for n in ns]
         notes.append("Ensemble: Mittel der Teilprognosen; die Intervallgrenzen sind das Mittel der Grenzen (Näherung).")
-        return _blend(frames, ["unique_id", "ds"]), notes
-    return get_adapter(selected).predict(prep.df, h, prep.freq, level, prep.season_length), get_adapter(selected).notes(level)
+        return _blend([f for f, _ in parts], ["unique_id", "ds"]), notes
+    return _predict_one(selected, prep, h, level)
+
+
+def _intermittent_warnings(prep: Prepared, n_windows: int) -> list[str]:
+    if not prep.intermittent:
+        return []
+    ids = sorted(prep.intermittent)
+    msg = f"{len(ids)} von {prep.df['unique_id'].nunique()} Serien sind intermittierend (viele Nullen), z. B. {', '.join(ids[:5])}."
+    if n_windows >= 1:
+        msg += " Bei auto kommen Croston-Verfahren (SBA, TSB, IMAPA, ADIDA) dazu; für diese Serien wird der RMSE statt des MAE verglichen."
+    return [msg]
+
+
+def _cov_info(prep: Prepared) -> dict | None:
+    if prep.cov is None:
+        return None
+    return {"future_known": list(prep.cov.future), "past_only": list(prep.cov.past_only)}
+
+
+def _cov_warnings(prep: Prepared, names: list[str], selected: str | None = None, validated: bool | None = None) -> list[str]:
+    if prep.cov is None:
+        return []
+    out = []
+    if not any(split_name(n)[1] for n in names):
+        out.append(
+            "Kovariaten übergeben, aber kein Modell der Auswahl kann sie nutzen (z. B. chronos_2, tirex_2 oder auto_arima mit "
+            "bekannten Zukunftswerten). Die Prognose nutzt nur die Zielreihe."
+        )
+    elif selected is not None and validated and "@cov" not in selected:
+        out.append("Die Kovariaten verbessern den Backtest nicht: das gewählte Modell nutzt nur die Zielreihe.")
+    if not prep.cov.future:
+        out.append(
+            "Keine Zukunftswerte übergeben (future_covariates): Alle Kovariaten gelten als nur in der Vergangenheit bekannt."
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- forecast
@@ -217,11 +304,13 @@ def run_forecast(
     n_windows: int = 2,
     level: int = 80,
     ensemble: bool = True,
+    covariates: list[str] | None = None,
+    future_covariates: list[dict] | None = None,
 ) -> dict:
-    prep = prepare(records, freq, season_length, h)
-    names = resolve_models(models)
+    prep = prepare(records, freq, season_length, h, covariates, future_covariates)
+    names = resolve_models(models, intermittent=bool(prep.intermittent), cov=prep.cov)
     base = baseline_name()
-    warnings: list[str] = []
+    warnings: list[str] = _intermittent_warnings(prep, n_windows)
     errors: dict[str, str] = {}
     scores: dict[str, dict] = {}
     skipped: list[str] = []
@@ -233,6 +322,7 @@ def run_forecast(
                 raise DataError("n_windows=0 (ohne Backtest) geht nur mit genau einem Modell")
             selected, validated = cands[0], None
             warnings.append("Kein Backtest durchgeführt: Modell nicht validiert.")
+            warnings += _cov_warnings(prep, names)
         else:
             results: dict[str, pd.DataFrame] = {}
             for n in names:
@@ -246,11 +336,12 @@ def run_forecast(
                     errors[n] = f"{type(e).__name__}: {e}"
             if base not in results:
                 raise RuntimeError(f"Baseline '{base}' fehlgeschlagen: {errors.get(base)}")
-            scores = score_models(results, base)
+            scores = score_models(results, base, prep.intermittent)
             ens = None
             if ensemble:
-                results, scores, ens = _add_ensemble(results, scores, base)
+                results, scores, ens = _add_ensemble(results, scores, base, prep.intermittent)
             selected, validated, warn = select_final(scores, base, ens)
+            warnings += _cov_warnings(prep, names, selected, validated)
             if warn:
                 warnings.append(warn)
             if skipped:
@@ -280,6 +371,7 @@ def run_forecast(
         "season_length": prep.season_length,
         "h": h,
         "level": level,
+        "covariates": _cov_info(prep),
         "forecast": _records(fc, ["unique_id", "ds", "yhat", "lo", "hi"]),
     }
 
@@ -294,10 +386,12 @@ def run_backtest(
     level: int = 80,
     include_rows: bool = False,
     ensemble: bool = True,
+    covariates: list[str] | None = None,
+    future_covariates: list[dict] | None = None,
 ) -> dict:
-    """Nur der Modellvergleich, ohne Endprognose."""
-    prep = prepare(records, freq, season_length, h)
-    names = resolve_models(models)
+    """Nur der Modellvergleich, ohne Endprognose. Mit Kovariaten: jedes fähige Modell mit (`@cov`) und ohne."""
+    prep = prepare(records, freq, season_length, h, covariates, future_covariates)
+    names = resolve_models(models, intermittent=bool(prep.intermittent), cov=prep.cov)
     base = baseline_name()
     results, errors = {}, {}
     with _SLOTS:
@@ -311,16 +405,17 @@ def run_backtest(
                 errors[n] = f"{type(e).__name__}: {e}"
     if base not in results:
         raise RuntimeError(f"Baseline '{base}' fehlgeschlagen: {errors.get(base)}")
-    scores = score_models(results, base)
+    scores = score_models(results, base, prep.intermittent)
     ens = None
     if ensemble:
-        results, scores, ens = _add_ensemble(results, scores, base)
+        results, scores, ens = _add_ensemble(results, scores, base, prep.intermittent)
     best, validated, warn = select_final(scores, base, ens)
     out = {
         "baseline": base,
         "best_model": best,
         "validated": validated,
-        "warnings": [warn] if warn else [],
+        "warnings": _intermittent_warnings(prep, n_windows) + _cov_warnings(prep, names, best, validated) + ([warn] if warn else []),
+        "covariates": _cov_info(prep),
         "backtest": scores,
         "errors": errors,
         "freq": prep.freq,
