@@ -90,7 +90,7 @@ pins a commit as a tarball, so the image build needs access to github.com), entr
 in `models.yaml` (`device: cpu`). They are **not yet default candidates**: add them to a request with
 `models: ["auto", "timestral_28m"]` (auto plus this model) or `models: ["timestral_28m"]`, and decide on
 `default_candidates` after your own benchmark (`live/benchmark.py --models ...,timestral_28m,timestral_209m`). The
-published benchmark results are Mistral's own claims, not measured here. The model gives 21 quantiles (0.01 to 0.99), so
+benchmark results published by Mistral are not re-measured here; our own measurements are in the benchmark sections below. The model gives 21 quantiles (0.01 to 0.99), so
 common interval levels are covered. Covariates (past-only and known-future) work if the checkpoint supports them; the
 adapter reads that from `config.json` (a checkpoint without known-future support gets those columns as past-only
 covariates, with a warning). `symmetric_averaging: false` in the entry halves the compute time at some cost in accuracy
@@ -161,23 +161,25 @@ the real ARIMA path and fakes for the foundation models, so verify Chronos-2 and
 series), holds back the end of each (h = 6 to 48), lets the service forecast with the remaining data only, and compares
 the result with the true values. The metric is the relative MAE against the `seasonal_naive` baseline (1.00; lower is
 better). `Auto` is the behavior with `models: ["auto"]` (backtest with 4 windows, including the ensemble). As of October
-2026, CPU, models `chronos_bolt_small` and `tirex_2`.
+2026, CPU, models `chronos_bolt_small` and `tirex_2`; the columns `TS28` and `TS209` (Timestral 28M and 209M) and
+`Auto + TS28` (`auto` with `timestral_28m` added as a candidate, which is not the default of this repository) come from a
+later run on the same data (16 October 2026). The other columns were reproduced exactly in that run.
 
-| Dataset | h | Auto picks | Auto | ETS | Theta | Chronos | TiRex-2 |
-|---|---|---|---|---|---|---|---|
-| airline (monthly passengers) | 12 | ensemble | 0.38 | 0.74 | 0.40 | 0.39 | 0.24 |
-| autos (monthly car sales) | 12 | ETS | 0.80 | 0.80 | 0.83 | 0.74 | 0.97 |
-| sonnenfl (monthly sunspots) | 24 | TiRex-2 | 0.34 | 1.09 | 1.21 | 0.90 | 0.34 |
-| temp_mon (monthly mean temperature) | 12 | ensemble | 0.77 | 0.93 | 0.95 | 0.86 | 0.73 |
-| raub (monthly robberies, noisy) | 12 | ensemble | 0.64 | 0.60 | 0.72 | 0.46 | 0.56 |
-| shampoo (36 months) | 6 | Theta | 0.54 | 0.35 | 0.54 | 0.68 | 0.60 |
-| geburten (daily births, noise) | 14 | ensemble | 1.06 | 1.08 | 1.07 | 1.07 | 1.06 |
-| temp_tag (daily minimum temperature) | 28 | ensemble | 0.77 | 0.74 | 0.74 | 0.80 | 0.76 |
-| trafo_tag (daily transformer load/temp., 3 series) | 14 | ensemble | 0.91 | 0.82 | 0.81 | 0.92 | 0.89 |
-| trafo_std (hourly transformer, 2 series) | 48 | ensemble | 0.61 | 1.36 | 0.64 | 0.63 | 0.63 |
-| bier_q (quarterly beer production) | 8 | ensemble | 0.75 | 0.80 | 0.83 | 0.85 | 0.84 |
-| benzin_w (weekly US gasoline) | 26 | ensemble | 0.98 | 2.11 | 1.23 | 0.91 | 1.15 |
-| **Mean** | | | **0.713** | 0.952 | 0.831 | 0.768 | 0.731 |
+| Dataset | h | Auto picks | Auto | ETS | Theta | Chronos | TiRex-2 | TS28 | TS209 | Auto + TS28 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| airline (monthly passengers) | 12 | ensemble | 0.38 | 0.74 | 0.40 | 0.39 | 0.24 | 0.19 | 0.20 | 0.28 |
+| autos (monthly car sales) | 12 | ETS | 0.80 | 0.80 | 0.83 | 0.74 | 0.97 | 0.59 | 0.67 | 0.80 |
+| sonnenfl (monthly sunspots) | 24 | TiRex-2 | 0.34 | 1.09 | 1.21 | 0.90 | 0.34 | 0.38 | 0.35 | 0.38 |
+| temp_mon (monthly mean temperature) | 12 | ensemble | 0.77 | 0.93 | 0.95 | 0.86 | 0.73 | 0.76 | 0.76 | 0.77 |
+| raub (monthly robberies, noisy) | 12 | ensemble | 0.64 | 0.60 | 0.72 | 0.46 | 0.56 | 0.51 | 0.43 | 0.64 |
+| shampoo (36 months) | 6 | Theta | 0.54 | 0.35 | 0.54 | 0.68 | 0.60 | 0.51 | 0.49 | 0.54 |
+| geburten (daily births, noise) | 14 | ensemble | 1.06 | 1.08 | 1.07 | 1.07 | 1.06 | 1.09 | 1.07 | 1.06 |
+| temp_tag (daily minimum temperature) | 28 | ensemble | 0.77 | 0.74 | 0.74 | 0.80 | 0.76 | 0.79 | 0.80 | 0.79 |
+| trafo_tag (daily transformer load/temp., 3 series) | 14 | ensemble | 0.91 | 0.82 | 0.81 | 0.92 | 0.89 | 1.18 | 0.96 | 0.91 |
+| trafo_std (hourly transformer, 2 series) | 48 | ensemble | 0.61 | 1.36 | 0.64 | 0.63 | 0.63 | 0.60 | 0.63 | 0.60 |
+| bier_q (quarterly beer production) | 8 | ensemble | 0.75 | 0.80 | 0.83 | 0.85 | 0.84 | 0.97 | 1.11 | 0.75 |
+| benzin_w (weekly US gasoline) | 26 | ensemble | 0.98 | 2.11 | 1.23 | 0.91 | 1.15 | 1.10 | 1.23 | 0.98 |
+| **Mean** | | | **0.713** | 0.952 | 0.831 | 0.768 | 0.731 | 0.723 | 0.724 | 0.709 |
 
 The dataset names are the identifiers printed by `live/benchmark.py`.
 
@@ -187,6 +189,10 @@ How to read this, and limits:
 - On average, the foundation models are better than ETS and Theta, but none is best everywhere. The ensemble of the two
   best backtest models mainly avoids outliers (e.g. `benzin_w`: 0.98 instead of 1.23 with Theta, `raub`: 0.64 instead of
   0.72). A selection without the ensemble scored 0.757 in the same run.
+- Timestral (`TS28`, `TS209`): on average level with TiRex-2 (0.723 and 0.724 against 0.731; within the noise), clearly
+  ahead on `airline` and `autos`, and at or above the baseline (> 1.0) on `trafo_tag` (28M), `bier_q` (209M) and `benzin_w`
+  (both) as well as on `geburten`, where no model beats it. `auto` catches those cases in the backtest. `Auto + TS28`
+  (0.709) is not measurably better than `Auto` (0.713), and the 209M model is no better than the 28M on these 12 datasets.
 - 12 datasets with a single hold-out period each are a small sample; differences below about 0.03 are noise. The
   ensemble rule was designed after a first run on the same data (tolerance factor 1.05 fixed in advance, not tuned), so
   the numbers are slightly optimistic. An independent check with your own data is still open.
@@ -238,8 +244,45 @@ How to read this, and limits:
 - Croston, TSB, IMAPA and ADIDA are meant for intermittent demand and score badly on these smooth series, as expected.
   `auto` only adds them for series that are detected as intermittent, and none of the 60 M4 series were. On series without
   zeros, IMAPA and ADIDA are identical.
-- 20 series per frequency and one hold-out each is a small sample, and Yearly, Monthly and Daily were not run. These
+- 20 series per frequency and one hold-out each is a small sample, and Yearly, Monthly and Daily were not run in this first run (see the second run). These
   numbers show a tendency, not a ranking.
+
+**Second run with Timestral** (October 2026, CPU, 40 random M4 series from each of the six frequencies, seed 1, 3 backtest
+windows, via LiteLLM; 240 series; single models `theta`, `auto_ets`, `auto_arima`, `chronos_bolt_small`, `tirex_2`,
+`timestral_28m`, `timestral_209m`; `auto` ran with `timestral_28m` as an additional candidate, which is not the default of
+this repository). Relative MAE against `seasonal_naive`, geometric mean (1.00 = baseline, lower is better):
+
+| Model | Yearly | Quarterly | Monthly | Weekly | Daily | Hourly | All 240 (rel. MAE geo) | Win rate | Coverage 80 % |
+|---|---|---|---|---|---|---|---|---|---|
+| Timestral 209M | 0.780 | 0.575 | 0.550 | 0.306 | 0.756 | 0.598 | **0.570** | 75 % | 79 |
+| Timestral 28M | 0.768 | 0.610 | 0.538 | 0.317 | 0.753 | 0.644 | **0.582** | 74 % | 78 |
+| **Auto** (with `timestral_28m` as candidate) | 0.775 | 0.657 | 0.566 | 0.318 | 0.745 | 0.633 | **0.593** | 75 % | 81 |
+| TiRex-2 | 0.757 | 0.607 | 0.584 | 0.331 | 0.766 | 0.713 | 0.604 | 72 % | 78 |
+| AutoARIMA | 0.849 | 0.654 | 0.524 | 0.363 | 0.762 | 0.824 | 0.636 | 70 % | 77 |
+| Chronos-Bolt small | 1.059 | 0.676 | 0.641 | 0.335 | 0.735 | 0.761 | 0.664 | 70 % | 80 |
+| AutoETS | 0.731 | 0.664 | 0.645 | 0.442 | 0.738 | 1.360 | 0.720 | 67 % | 76 |
+| Theta | 0.668 | 0.763 | 0.578 | 0.419 | 0.748 | 1.925 | 0.750 | 68 % | 74 |
+
+How to read this, and limits:
+
+- Over all 240 series Timestral is the best single model (28M: 0.582, 209M: 0.570, against 0.604 for TiRex-2, 0.636 for
+  AutoARIMA, 0.664 for Chronos-Bolt, 0.720 for AutoETS and 0.750 for Theta). With 40 series per frequency, differences of
+  0.01 to 0.02 are noise, including 28M against 209M.
+- The ranking depends on the frequency. Timestral leads on Weekly and Hourly (209M also on Quarterly). On Monthly AutoARIMA
+  is best (0.524; 28M: 0.538). On Daily all models are between 0.735 and 0.766, so there is nothing to read. **On Yearly
+  both Timestral models (0.768, 0.780) are behind Theta (0.668) and AutoETS (0.731)**, and only about half of the series
+  beat the baseline.
+- `auto` (0.593) is not better than the best single model, but better than every single model except the two Timestral
+  models. It chose an ensemble containing `timestral_28m` for 200 of 240 series, so this result depends on Timestral being a
+  candidate. We did not run `auto` without Timestral on this sample and make no claim about its added value here.
+- On Hourly AutoETS (1.36) and Theta (1.93) are worse than the baseline; `auto` stays at 0.63.
+- The 80 % intervals of both Timestral models cover 78 to 79 % overall (a bit narrow on Yearly: 72 and 75 %, and on Daily:
+  75 and 77 %). `auto` covers 81 % (Hourly: 90 %, wide). TiRex-2 covers only 59 % on Yearly.
+- `validated: true` was reported for all 240 series, but only 75 % of them beat the baseline in the hold-out (Yearly:
+  52 %). It means "better than the baseline in the backtest", not a guarantee for the future.
+- M4 is public data. The Hugging Face model card of Timestral (checked 16 October 2026) names no training data and makes no
+  statement about overlap with benchmarks, and we did not check this for the other models either. An advantage on M4 can
+  therefore be partly memorization. The real test is your own data (`--source csv`).
 Monash and GIFT-Eval loaders are not implemented; their data can be passed in via `--source csv`.
 
 ## Docker and LiteLLM
