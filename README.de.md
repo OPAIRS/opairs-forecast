@@ -67,6 +67,12 @@ huggingface-cli download amazon/chronos-bolt-small --local-dir /srv/models/times
 huggingface-cli download NX-AI/TiRex-2 model-config.yaml model.ckpt --local-dir /srv/models/timeseries/tirex-2
 ```
 
+```bash
+# Timestral (Mistral AI; Code Apache-2.0, Gewichte "Modified MIT license" – Lizenztext vorher lesen, siehe THIRD_PARTY.md)
+huggingface-cli download mistralai/Timestral-28M  config.json model.safetensors --local-dir /srv/models/timeseries/timestral-28m
+huggingface-cli download mistralai/Timestral-209M config.json model.safetensors --local-dir /srv/models/timeseries/timestral-209m
+```
+
 Im Container gilt `HF_HUB_OFFLINE=1`: Es gibt keine Downloads zur Laufzeit. Nicht vorhandene Modelle werden in
 `models: ["auto"]` übersprungen. Wird ein fehlendes Modell ausdrücklich angefragt, antwortet der Service mit 422.
 
@@ -76,6 +82,23 @@ bei `models: ["auto"]` und wird übersprungen, solange die Gewichte fehlen. Der 
 (das mitgelieferte `python:3.11-slim` hat keins), und die GPU braucht Compute Capability 8.0 oder höher. Der Vorgänger
 TiRex 1 (`tirex-ts`) steht unter der NXAI Community License und ist bewusst nicht eingebaut. Die Quantilniveaus liest der
 Adapter aus dem geladenen Modell. Liegt das gewünschte Intervall außerhalb, wird begrenzt und der Service warnt.
+
+**Timestral** (Mistral AI): Paket `timestral` (Python >= 3.10, PyTorch >= 2.4; nicht auf PyPI, `requirements-foundation.txt`
+pinnt einen Commit als Tarball, der Image-Build braucht also Zugriff auf github.com), Einträge `timestral_28m` und
+`timestral_209m` in `models.yaml` (`device: cpu`). Sie sind **noch keine Standardkandidaten**: Man nimmt sie mit
+`models: ["auto", "timestral_28m"]` (auto plus dieses Modell) oder `models: ["timestral_28m"]` in die Anfrage auf und
+entscheidet über `default_candidates` nach dem eigenen Benchmark (`live/benchmark.py --models ...,timestral_28m,timestral_209m`).
+Die veröffentlichten Benchmarkergebnisse sind Angaben von Mistral, hier nicht nachgemessen. Das Modell liefert 21 Quantile
+(0,01 bis 0,99), übliche Intervallniveaus sind damit abgedeckt. Kovariaten (nur Vergangenheit und zukünftig bekannt)
+funktionieren, wenn der Checkpoint sie unterstützt; der Adapter liest das aus der `config.json` (ein Checkpoint ohne
+Known-Future-Unterstützung bekommt diese Spalten als reine Vergangenheitskovariaten, mit Warnung). `symmetric_averaging: false`
+im Eintrag halbiert die Rechenzeit auf Kosten etwas geringerer Genauigkeit (Standard des Pakets: an). Die Unit-Tests nutzen
+Fake-Module; `live/live_covariates.py --models timestral_28m` zeigt mit echten Gewichten, ob die Kovariaten helfen.
+**Lizenz:** Der Code steht unter Apache-2.0. Die Gewichte stehen unter einer „Modified MIT License“ (Feld „other“ auf
+Hugging Face), deren Rechte nur gelten, solange der globale konsolidierte Monatsumsatz des nutzenden Unternehmens im Vormonat
+höchstens 20 Mio. USD beträgt; darüber braucht es die kommerzielle Lizenz von Mistral AI. Die Grenze gilt auch für abgeleitete
+Modelle. Vor dem Einschalten für das **eigene** Unternehmen prüfen und die LICENSE-Dateien selbst lesen (siehe
+THIRD_PARTY.md). Wegen dieser Grenze ist Timestral im `models.yaml` dieses Repositories bewusst kein Standardkandidat.
 
 Intervalle: Chronos-Bolt kennt nur Quantile von 10 bis 90 %. Höhere Niveaus werden begrenzt und der Service warnt.
 Für `level` über 80 daher Chronos-2 oder ein Statistikmodell verwenden.
@@ -227,8 +250,24 @@ aufrufen, Ergebnis darstellen); die Modelle laufen im Service. Es stehen keine Z
 optional `DB_DSN` für SQL-Blöcke) trägst du nach dem Import in den Valves der Pipe ein. Für mehr als einen Test: eigener
 LiteLLM-Virtual-Key statt Master-Key und ein nur lesender Datenbankbenutzer.
 
+**Was die Pipe kann (Version 0.8.x):**
+- **Datenquellen:** CSV-Block im Chat, angehängte CSV-Datei, SQL-Block (direkt über `DB_DSN`) oder über Superset SQL Lab mit
+  `projekt=1723` (der SQL-Block läuft gegen die Datenbank dieses Projekts; `{prefix}` wird zu `p1723`). Ohne Codeblock genügt
+  `Prognose projekt=1723: wöchentliche Lieferungen nach Lieferdatum`: Ein Sprachmodell (`SQL_MODEL`, über LiteLLM) schreibt
+  aus dem Live-Schema ein lesendes `SELECT`; das erzeugte SQL steht zur Prüfung unter dem Ergebnis.
+- **Kovariaten:** weitere Zahlenspalten neben `ds`, `y`, `unique_id` gelten als Kovariaten; Zeilen am Ende ohne `y` sind die
+  Zukunft (genau `h` je Serie). Spalten mit Werten dort sind zukünftig bekannt (z. B. Wartungsplan), leere nur aus der Vergangenheit.
+- **Optionen in der Nachricht:** `h=12`, `freq=W-MON`, `models=a,b`, `level=80`, `windows=3`, `season=12`, `ensemble=aus`,
+  `erklärung=aus` (ohne KI-Einordnung), Aktionen `Prognose` / `Backtest` / `Anomalien` / `Modelle`.
+- **KI-Einordnung (optional):** Mit `EXPLAIN_MODEL` erklärt ein lokales Modell (über LiteLLM) das Ergebnis in Alltagssprache.
+  Es bekommt nur die Zahlen und vorab berechnete Aussagen, rechnet nicht selbst und ist nicht Teil der Prognose.
+- **Schutzmaßnahmen:** nur lesende, einzelne `SELECT`/`WITH`-Abfragen; bei erzeugtem SQL werden laufende und künftige Perioden
+  entfernt, Lücken bei Zählwerten mit 0 gefüllt, und bei zu kurzer Historie fällt die Saisonlänge auf 4 zurück.
+- **Wichtige Valves:** `LITELLM_URL`, `LITELLM_API_KEY`, `SUPERSET_URL/USER/PASSWORD` (Nur-Lese-Konto), `SQL_MODEL`,
+  `SCHEMA_TABLES` (dem Modell gezeigte Tabellen), `SCHEMA_NOTES` (Hinweise zu den Daten), `EXPLAIN_MODEL`, `DEBUG`.
+
 **Wichtig bei größeren Läufen:** LiteLLM bricht Aufrufe an MCP-Server standardmäßig nach 60 Sekunden ab
-(`LITELLM_MCP_CLIENT_TIMEOUT`, Standard 60,0). Gemessen auf einer 80-Kern-CPU mit `FORECAST_N_JOBS=16`, über LiteLLM, mit
+(`LITELLM_MCP_CLIENT_TIMEOUT`, Standard 60,0). Gemessen auf einem Server mit 80 vCPUs (Hardware-Threads, keine 80 physischen Kerne) mit `FORECAST_N_JOBS=16`, über LiteLLM, mit
 synthetischen Monatsreihen (120 Monate, alle Modelle per `auto` inklusive Backtest): 50 Serien rund 17 Sekunden, 200 Serien
 rund 35 Sekunden. Ohne Prozess-Parallelität (`FORECAST_N_JOBS=1`) dauerten dieselben Läufe rund 30 Sekunden bzw. 2 bis
 2,5 Minuten. Die Laufzeit hängt stark von Hardware, Serienlänge, Modellen und Fenstern ab (`live/loadtest.py` wiederholt den Test). Für solche Läufe in der Umgebung von LiteLLM `LITELLM_MCP_CLIENT_TIMEOUT=900` setzen. Ohne den Wert
@@ -263,4 +302,4 @@ Benchmark-Daten werden nicht mitgeliefert.
 pip install pytest && pytest -q
 ```
 
-Die Chronos- und TiRex-Tests nutzen Fake-Module und prüfen nur den Datenfluss der Adapter, nicht die echten Modelle.
+Die Chronos-, TiRex- und Timestral-Tests nutzen Fake-Module und prüfen nur den Datenfluss der Adapter, nicht die echten Modelle.

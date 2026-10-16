@@ -5,6 +5,7 @@ from functools import lru_cache
 from .adapters.base import Adapter, CovSpec
 from .adapters.chronos import ChronosAdapter
 from .adapters.stats import StatsAdapter
+from .adapters.timestral import TimestralAdapter
 from .adapters.tirex import TiRex2Adapter
 from .config import DEVICE, load_config
 
@@ -39,6 +40,14 @@ def _build(name: str, spec: dict) -> Adapter:
         return TiRex2Adapter(
             name, spec["path"], device=spec.get("device", DEVICE), batch_size=int(spec.get("batch_size", 256))
         )
+    if t == "timestral":
+        return TimestralAdapter(
+            name,
+            spec["path"],
+            device=spec.get("device", DEVICE),
+            batch_size=int(spec.get("batch_size", 32)),
+            symmetric_averaging=bool(spec.get("symmetric_averaging", True)),
+        )
     raise ValueError(f"Unbekannter Modelltyp '{t}' bei '{name}'")
 
 
@@ -61,24 +70,27 @@ def resolve_models(requested: list[str] | None, intermittent: bool = False, cov:
     cov (Kovariaten vorhanden) ergänzt zu jedem Modell, das sie nutzen kann, die Variante `<name>@cov`. So zeigt der
     Backtest direkt, ob die Kovariaten helfen: dasselbe Modell mit und ohne."""
     cfg = load_config()
-    if not requested or requested == ["auto"]:
+    # "auto" (oder keine Angabe) = Standardkandidaten; weitere Namen daneben ergänzen sie (z. B. ["auto", "timestral_28m"]).
+    auto = not requested or "auto" in requested
+    extra = [n for n in (requested or []) if n != "auto"]
+    names: list[str] = []
+    if auto:
         names = list(cfg["default_candidates"])
         if intermittent:
             names += list(cfg["intermittent_candidates"])
         names = [n for n in names if n == baseline_name() or get_adapter(n).available()[0]]
-    else:
-        names = list(requested)
-        for n in names:
-            base, use_cov = split_name(n)
-            ad = get_adapter(base)  # wirft UnknownModel bei unbekanntem Namen
-            ok, why = ad.available()
-            if not ok:
-                raise UnknownModel(f"Modell '{n}' ist nicht verfügbar: {why}")
-            if use_cov and (cov is None or not ad.can_use(cov)):
-                raise UnknownModel(
-                    f"'{n}': {base} kann die übergebenen Kovariaten nicht nutzen "
-                    "(keine Kovariaten angegeben, Modell ohne Kovariatenunterstützung oder keine bekannten Zukunftswerte)"
-                )
+    for n in extra:
+        base, use_cov = split_name(n)
+        ad = get_adapter(base)  # wirft UnknownModel bei unbekanntem Namen
+        ok, why = ad.available()
+        if not ok:
+            raise UnknownModel(f"Modell '{n}' ist nicht verfügbar: {why}")
+        if use_cov and (cov is None or not ad.can_use(cov)):
+            raise UnknownModel(
+                f"'{n}': {base} kann die übergebenen Kovariaten nicht nutzen "
+                "(keine Kovariaten angegeben, Modell ohne Kovariatenunterstützung oder keine bekannten Zukunftswerte)"
+            )
+        names.append(n)
     if baseline_name() not in names:
         names.insert(0, baseline_name())
     if cov is not None:

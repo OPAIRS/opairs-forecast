@@ -68,6 +68,12 @@ huggingface-cli download amazon/chronos-bolt-small --local-dir /srv/models/times
 huggingface-cli download NX-AI/TiRex-2 model-config.yaml model.ckpt --local-dir /srv/models/timeseries/tirex-2
 ```
 
+```bash
+# Timestral (Mistral AI; code Apache-2.0, weights "Modified MIT license" - read the license text first, see THIRD_PARTY.md)
+huggingface-cli download mistralai/Timestral-28M  config.json model.safetensors --local-dir /srv/models/timeseries/timestral-28m
+huggingface-cli download mistralai/Timestral-209M config.json model.safetensors --local-dir /srv/models/timeseries/timestral-209m
+```
+
 Inside the container `HF_HUB_OFFLINE=1` applies: there are no downloads at runtime. Models that are not present are
 skipped with `models: ["auto"]`. If a missing model is requested explicitly, the service answers with 422.
 
@@ -78,6 +84,22 @@ CUDA toolkit matching PyTorch (the supplied `python:3.11-slim` has none), and th
 higher. Its predecessor TiRex 1 (`tirex-ts`) is under the NXAI Community License and is deliberately not integrated.
 The adapter reads the quantile levels from the loaded model. If the requested interval lies outside them, it is clamped
 and the service warns.
+
+**Timestral** (Mistral AI): package `timestral` (Python >= 3.10, PyTorch >= 2.4; not on PyPI, `requirements-foundation.txt`
+pins a commit as a tarball, so the image build needs access to github.com), entries `timestral_28m` and `timestral_209m`
+in `models.yaml` (`device: cpu`). They are **not yet default candidates**: add them to a request with
+`models: ["auto", "timestral_28m"]` (auto plus this model) or `models: ["timestral_28m"]`, and decide on
+`default_candidates` after your own benchmark (`live/benchmark.py --models ...,timestral_28m,timestral_209m`). The
+published benchmark results are Mistral's own claims, not measured here. The model gives 21 quantiles (0.01 to 0.99), so
+common interval levels are covered. Covariates (past-only and known-future) work if the checkpoint supports them; the
+adapter reads that from `config.json` (a checkpoint without known-future support gets those columns as past-only
+covariates, with a warning). `symmetric_averaging: false` in the entry halves the compute time at some cost in accuracy
+(upstream default is on). The unit tests use fake modules; `live/live_covariates.py --models timestral_28m` shows
+with real weights whether the covariates help. **License:** the code is Apache-2.0. The weights are under a "Modified MIT License" (field "other" on Hugging
+Face) whose rights only apply while the user's company has a global consolidated monthly revenue of at most USD 20 million
+(preceding month); above that, Mistral AI's commercial license is required. The limit also covers derivatives. Check it for
+YOUR company before enabling Timestral, and read the LICENSE files yourself (see THIRD_PARTY.md). Because of this limit,
+Timestral is deliberately not a default candidate in this repository's `models.yaml`.
 
 Intervals: Chronos-Bolt only provides quantiles from 10 to 90 %. Higher levels are clamped and the service warns.
 For `level` above 80, use Chronos-2 or a statistical model.
@@ -233,8 +255,24 @@ importing the pipe, enter the LiteLLM key (and optionally `DB_DSN` for SQL block
 test: use a dedicated LiteLLM virtual key instead of the master key, and a read-only database user. The pipe's user
 interface texts are in German.
 
+**What the pipe can do (version 0.8.x):**
+- **Data sources:** a CSV block in the chat, an attached CSV file, an SQL block (direct, via `DB_DSN`), or via Superset SQL Lab
+  with `projekt=1723` (the SQL block runs against that project's database; `{prefix}` becomes `p1723`). Without a code
+  block, `Prognose projekt=1723: weekly deliveries by delivery date` is enough: a language model (`SQL_MODEL`, via LiteLLM)
+  writes one read-only `SELECT` from the live schema; the generated SQL is shown below the result for review.
+- **Covariates:** extra numeric columns next to `ds`, `y`, `unique_id` are covariates; trailing rows without `y` are the
+  future (exactly `h` per series). Columns with values there are future-known (e.g. maintenance plan), empty ones are past-only.
+- **Options in the message:** `h=12`, `freq=W-MON`, `models=a,b`, `level=80`, `windows=3`, `season=12`, `ensemble=aus`,
+  `erklärung=aus` (without AI commentary), actions `Prognose` / `Backtest` / `Anomalien` / `Modelle`.
+- **AI commentary (optional):** with `EXPLAIN_MODEL` set, a local model (via LiteLLM) explains the result in plain language.
+  It only receives the numbers and pre-computed statements; it does not calculate and is not part of the forecast.
+- **Safeguards:** only read-only single `SELECT`/`WITH` statements; for generated SQL, the current and future periods are
+  dropped, gaps are filled with 0 (counts), and the season length falls back to 4 if the history is too short for the automatic one.
+- **Useful Valves:** `LITELLM_URL`, `LITELLM_API_KEY`, `SUPERSET_URL/USER/PASSWORD` (read-only account), `SQL_MODEL`,
+  `SCHEMA_TABLES` (tables shown to the model), `SCHEMA_NOTES` (hints about your data), `EXPLAIN_MODEL`, `DEBUG`.
+
 **Important for larger runs:** by default, LiteLLM aborts calls to MCP servers after 60 seconds
-(`LITELLM_MCP_CLIENT_TIMEOUT`, default 60.0). Measured on an 80-core CPU with `FORECAST_N_JOBS=16`, via LiteLLM, with
+(`LITELLM_MCP_CLIENT_TIMEOUT`, default 60.0). Measured on a server with 80 vCPUs (hardware threads, not 80 physical cores) with `FORECAST_N_JOBS=16`, via LiteLLM, with
 synthetic monthly series (120 months, all models via `auto` including backtest): 50 series about 17 seconds, 200 series
 about 35 seconds. Without process parallelism (`FORECAST_N_JOBS=1`) the same runs took about 30 seconds and about 2 to
 2.5 minutes. Runtimes depend strongly on hardware, series length, models and windows (`live/loadtest.py` reproduces the test). For such runs, set `LITELLM_MCP_CLIENT_TIMEOUT=900` in LiteLLM's environment. Without it, the answer
@@ -269,4 +307,4 @@ benchmark data are not shipped. This is not legal advice.
 pip install pytest && pytest -q
 ```
 
-The Chronos and TiRex tests use fake modules and only check the data flow of the adapters, not the real models.
+The Chronos, TiRex and Timestral tests use fake modules and only check the data flow of the adapters, not the real models.
