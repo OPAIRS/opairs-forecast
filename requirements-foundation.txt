@@ -1,3 +1,6 @@
 # Foundation-Modelle (zieht PyTorch, ~2 GB). Nur installieren, wenn Chronos genutzt wird.
 chronos-forecasting>=2.0,<3
 tirex-2>=0.3,<1                    # TiRex-2 (Apache-2.0); benötigt Python >= 3.11, torch >= 2.8
+# Timestral (Mistral AI, Code Apache-2.0; Gewichte: Modified MIT). Nicht auf PyPI: festgepinnter Commit als Tarball
+# (das Image hat kein git). Der Build braucht Zugriff auf github.com; benötigt Python >= 3.10, torch >= 2.4.
+timestral @ https://github.com/mistralai/timestral/archive/a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff.tar.gz

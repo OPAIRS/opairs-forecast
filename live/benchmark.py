@@ -11,6 +11,7 @@ Kennzahl: relative MAE auf dem Rückhalte-Zeitraum, geteilt durch die Baseline (
 Aufruf (Schlüssel nicht ausgeben):
   LITELLM_KEY=$(grep '^LITELLM_MASTER_KEY=' .env | cut -d= -f2-) python3 benchmark.py
 Optionen: --url http://localhost:4000  --only airline,autos  --windows 4  --models a,b,c
+Timestral mitmessen: --models seasonal_naive,auto_ets,theta,chronos_bolt_small,tirex_2,timestral_28m,timestral_209m
 Die Datensätze werden von GitHub geladen (der Host braucht Internet, der Container nicht).
 """
 import argparse
@@ -178,7 +179,7 @@ def main():
     if base not in models:
         models.insert(0, base)
     only = {x for x in a.only.split(",") if x}
-    short = {"seasonal_naive": "sNaiv", "auto_ets": "ETS", "theta": "Theta", "chronos_bolt_small": "Chron", "tirex_2": "TiRex"}
+    short = {"seasonal_naive": "sNaiv", "auto_ets": "ETS", "theta": "Theta", "chronos_bolt_small": "Chron", "tirex_2": "TiRex", "timestral_28m": "TS28", "timestral_209m": "TS209"}
 
     results = []
     print(f"{'Datensatz':<10}{'h':>3} {'Auto wählt':<10}{'Auto':>6} " + " ".join(f"{short.get(m, m[:6]):>6}" for m in models) + "   Ens2 Top2")

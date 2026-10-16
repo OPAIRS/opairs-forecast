@@ -2,6 +2,7 @@
 # type: stats   -> statsforecast-Klasse (class, params)
 # type: chronos -> lokales Chronos-Verzeichnis (path), family: bolt | t5 | chronos2
 # type: tirex2  -> lokales TiRex-2-Verzeichnis (path: model-config.yaml + model.ckpt)
+# type: timestral -> lokales Timestral-Verzeichnis (path: config.json + model.safetensors)
 baseline: seasonal_naive            # Vergleichsmodell für die Validierung ("muss die Baseline schlagen")
 default_candidates:                 # was bei models: ["auto"] getestet wird
   - seasonal_naive
@@ -39,3 +40,12 @@ models:
   # TiRex-2 (NXAI, Apache-2.0). device: cpu ist der sichere Standard. Für cuda braucht das Image
   # ein CUDA Toolkit mit nvcc (passend zu PyTorch) und eine GPU mit Compute Capability >= 8.0.
   tirex_2:            {type: tirex2, path: /models/tirex-2, device: cpu}
+
+  # Timestral (Mistral AI; Code Apache-2.0, Gewichte "Modified MIT license" – Lizenztext vor dem Einsatz lesen).
+  # Im Repository KEIN Standardkandidat (default_candidates): Die Gewichte haben eine Umsatzgrenze (Modified MIT, 20 Mio. USD
+  # globaler Monatsumsatz des nutzenden Unternehmens, siehe THIRD_PARTY.md). Wer sie einhält, trägt timestral_28m selbst unter
+  # default_candidates ein, am besten nach dem eigenen Benchmark (live/benchmark.py).
+  # Aufruf bis dahin mit models: ["timestral_28m"] oder ["auto", "timestral_28m"] (auto plus dieses Modell). Kovariaten: Past, Known-Future, je nach
+  # Checkpoint (steht in config.json, wird zur Laufzeit gelesen). symmetric_averaging: false halbiert die Rechenzeit.
+  timestral_28m:      {type: timestral, path: /models/timestral-28m,  device: cpu}
+  timestral_209m:     {type: timestral, path: /models/timestral-209m, device: cpu}
